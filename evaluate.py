@@ -121,3 +121,4 @@ if __name__ == "__main__":
     print("\n===== FINAL RESULTS =====")
     print(f"Mean Reward: {np.mean(rewards):.2f}")
     print(f"Std Dev:     {np.std(rewards):.2f}")
+    #python -m evaluate --model checkpointbetter_500000.pth --render

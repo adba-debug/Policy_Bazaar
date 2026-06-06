@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.optim as optim
 from network import QNetwork
-from replay_buffer import PrioritizedReplayBuffer
+from replay import PrioritizedReplayBuffer
 from config import Config
 
 
@@ -31,7 +31,6 @@ class DoubleDQNAgent:
         self.config = config
         self.device = device
         self.step_count = 0
-        
 
         # Networks
         self.online_net = QNetwork(n_frames, n_actions).to(device)
@@ -64,8 +63,7 @@ class DoubleDQNAgent:
             float
         """
         epsilon = self.config.EPS_END + (self.config.EPS_START - self.config.EPS_END) * max(0, (self.config.EPS_DECAY_STEPS - self.step_count) / self.config.EPS_DECAY_STEPS)
-        return epsilon
-       
+        return max(self.config.EPS_END, epsilon)
 
     def select_action(self, state):
         """
@@ -77,14 +75,13 @@ class DoubleDQNAgent:
         """
         epsilon = self.get_epsilon()
         self.step_count += 1
-        if np.random.rand()<epsilon:
+        if np.random.rand() < epsilon:
             return np.random.randint(self.n_actions)
         else:
             state_tensor = torch.from_numpy(state).unsqueeze(0).float().to(self.device)
             with torch.no_grad():
                 q_values = self.online_net(state_tensor)
             return q_values.argmax().item()
-        
 
     def store_transition(self, state, action, reward, next_state, done):
         """Push a transition into the PER buffer."""
@@ -105,32 +102,47 @@ class DoubleDQNAgent:
         states, actions, rewards, next_states, dones, indices, is_weights = self.buffer.sample(self.config.BATCH_SIZE)
         if states is None:
             return None
-        states = states.to(self.device)
+            
+        # Convert everything to PyTorch tensors first, then move to the device
+        states = torch.tensor(states, dtype=torch.float32).to(self.device)
         actions = torch.tensor(actions, dtype=torch.long).unsqueeze(1).to(self.device)
-        rewards = rewards.to(self.device)
-        next_states = next_states.to(self.device)
-        terminated = dones.to(self.device)
+        rewards = torch.tensor(rewards, dtype=torch.float32).to(self.device)
+        next_states = torch.tensor(next_states, dtype=torch.float32).to(self.device)
+        terminated = torch.tensor(dones, dtype=torch.float32).to(self.device)
+        
         current_q = self.online_net(states).gather(1, actions).squeeze(1)
+        
         with torch.no_grad():
             next_state_actions = self.online_net(next_states).argmax(dim=1, keepdim=True)
             next_q_values = self.target_net(next_states).gather(1, next_state_actions).squeeze(1)
             target_q = rewards + (self.config.GAMMA * next_q_values * (1 - terminated))
-       
-        td_errors = torch.abs(current_q - target_q).detach()
-        self.buffer.update_priorities(indices, td_errors)
+            
+        is_weights = np.array(is_weights, dtype=np.float32)
         weights_tensor = torch.tensor(is_weights, dtype=torch.float32).to(self.device)
+        
+        # Update PER priorities based on temporal-difference error
+        td_errors = torch.abs(current_q - target_q).detach()
+        td_errors_np = td_errors.cpu().numpy()
+        self.buffer.update_priorities(indices, td_errors_np + self.config.PER_EPSILON)
 
-# Compute element-wise loss directly across the tensors
+        # Compute element-wise loss directly across the tensors weighted by PER importance sampling
         elementwise_loss = (current_q - target_q).pow(2)
         loss_val = torch.mean(weights_tensor * elementwise_loss)
+        
         self.optimiser.zero_grad()
         loss_val.backward()
         self.optimiser.step()
+        
         return loss_val.item()
+
     def save(self, path):
         """Save model weights to disk."""
         torch.save(self.online_net.state_dict(), path)
 
     def load(self, path):
-        """Load model weights from disk."""
-        self.online_net.load_state_dict(torch.load(path))
+        """Load model weights from disk safely across CPU/GPU targets."""
+        # map_location ensures hardware cross-compatibility
+        device_loc = torch.device(self.device)
+        self.online_net.load_state_dict(torch.load(path, map_location=device_loc))
+        if hasattr(self, "target_net"):
+            self.target_net.load_state_dict(torch.load(path, map_location=device_loc))

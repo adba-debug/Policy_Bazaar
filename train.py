@@ -74,7 +74,7 @@ def train():
         )
 
         # Learn if enough samples are available
-        if len(agent.buffer) >= config.TRAIN_START:
+        if len(agent.buffer) >= config.TRAIN_START  and step%4==0 :
             loss = agent.learn()
 
             if loss is not None:
